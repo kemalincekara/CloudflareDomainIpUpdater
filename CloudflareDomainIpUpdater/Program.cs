@@ -13,62 +13,129 @@ internal class Program
         {
             string exeName = Path.GetFileName(Environment.ProcessPath!);
             Console.WriteLine("Kullanım:");
-            Console.WriteLine($"{exeName} <E_Posta> <Global_API_Key> <Eski_IP> <Yeni_IP>");
+            Print(exeName, ConsoleColor.Cyan);
+            Print("--global", ConsoleColor.Yellow);
+            Print("<E-Posta>", ConsoleColor.Yellow);
+            Print("<Global-API-Key>", ConsoleColor.Yellow);
+            Print("<Eski.IP>", ConsoleColor.Red);
+            PrintLine("<Yeni.IP>", ConsoleColor.Green);
+            Console.WriteLine("veya");
+            Print(exeName, ConsoleColor.Cyan);
+            Print("--token", ConsoleColor.Yellow);
+            Print("<Access-Token>", ConsoleColor.Yellow);
+            Print("<Eski.IP>", ConsoleColor.Red);
+            PrintLine("<Yeni.IP>", ConsoleColor.Green);
+
             Console.WriteLine();
             Console.WriteLine("Çıkmak için herhangi bir tuşa basın.");
             Console.ReadKey();
             return;
         }
-        string email = args[0];
-        string key = args[1];
-        string oldIp = args[2];
-        string newIp = args[3];
         try
         {
-            using var client = new CloudFlareClient(new ApiKeyAuthentication(email, key));
-
-            var zones = await client.Zones.GetAsync();
-
-            if (!zones.Success)
+            string authType = args[0];
+            string oldContent;
+            string newContent;
+            IAuthentication authentication;
+            if (authType.Equals("--global", StringComparison.OrdinalIgnoreCase))
             {
-                PrintError(zones);
+                authentication = new ApiKeyAuthentication(args[1], args[2]);
+                oldContent = args[3];
+                newContent = args[4];
+            }
+            else if (authType.Equals("--token", StringComparison.OrdinalIgnoreCase))
+            {
+                authentication = new ApiTokenAuthentication(args[1]);
+                oldContent = args[2];
+                newContent = args[3];
+            }
+            else
+            {
+                Console.WriteLine("Geçersiz kimlik doğrulama türü. Lütfen '--global' veya '--token' kullanın.");
                 return;
             }
+            using var client = new CloudFlareClient(authentication);
+            int page = 1;
+            int perPage = 20;
+            int totalPages = 1;
 
-            foreach (var zone in zones.Result)
+            do
             {
-                var dnsRecords = await client.Zones.DnsRecords.GetAsync(zone.Id);
-                foreach (DnsRecord? record in dnsRecords.Result)
+                var zonesResponse = await client.Zones.GetAsync(displayOptions: new CloudFlare.Client.Api.Display.DisplayOptions
                 {
-                    if (record.Content == oldIp)
+                    Page = page,
+                    PerPage = perPage
+                });
+
+                if (!zonesResponse.Success)
+                {
+                    PrintError(zonesResponse);
+                    return;
+                }
+
+                totalPages = zonesResponse.ResultInfo.TotalPage;
+
+                if (zonesResponse.Result == null || zonesResponse.Result.Count == 0)
+                    break;
+
+                foreach (var zone in zonesResponse.Result)
+                {
+                    var dnsRecordsResponse = await client.Zones.DnsRecords.GetAsync(zone.Id);
+                    if (!dnsRecordsResponse.Success)
                     {
-                        var modified = new ModifiedDnsRecord
+                        PrintError(dnsRecordsResponse);
+                        continue;
+                    }
+                    foreach (DnsRecord? record in dnsRecordsResponse.Result)
+                    {
+                        if (record.Content.Contains(oldContent, StringComparison.OrdinalIgnoreCase))
                         {
-                            Type = record.Type,
-                            Name = record.Name,
-                            Content = newIp,
-                            Proxied = record.Proxied,
-                            Ttl = record.Ttl,
-                            Priority = record.Priority
-                        };
-                        var update = await client.Zones.DnsRecords.UpdateAsync(zone.Id, record.Id, modified);
-                        if (update.Success)
-                            Print($"Güncellendi: {record.Name}, {record.Type}, {oldIp} => {newIp}", ConsoleColor.Green);
-                        else
-                            PrintError(update);
+                            var replaceContent = record.Content.Replace(oldContent, newContent, StringComparison.OrdinalIgnoreCase);
+                            var modified = new ModifiedDnsRecord
+                            {
+                                Type = record.Type,
+                                Name = record.Name,
+                                Content = replaceContent,
+                                Proxied = record.Proxied,
+                                Ttl = record.Ttl,
+                                Priority = record.Priority
+                            };
+                            var updateResponse = await client.Zones.DnsRecords.UpdateAsync(zone.Id, record.Id, modified);
+                            if (updateResponse.Success)
+                            {
+                                Print("Güncellendi:", ConsoleColor.Green);
+                                Print(record.Name, ConsoleColor.Cyan);
+                                Print(record.Type.ToString(), ConsoleColor.Magenta);
+                                Print(record.Content, ConsoleColor.Yellow);
+                                Print("=>", ConsoleColor.White);
+                                PrintLine(replaceContent, ConsoleColor.Blue);
+                            }
+                            else
+                                PrintError(updateResponse);
+                        }
                     }
                 }
-            }
 
-            Print("Tüm kayıtlar güncellendi.", ConsoleColor.Green);
+                page++;
+            }
+            while (page <= totalPages);
+
+            PrintLine("Tüm kayıtlar güncellendi.", ConsoleColor.Green);
         }
         catch (Exception ex)
         {
-            Print(ex.ToString(), ConsoleColor.Red);
+            PrintLine(ex.ToString(), ConsoleColor.Red);
         }
     }
 
     private static void Print(string message, ConsoleColor color)
+    {
+        Console.ForegroundColor = color;
+        Console.Write($" {message} ");
+        Console.ResetColor();
+    }
+
+    private static void PrintLine(string message, ConsoleColor color)
     {
         Console.ForegroundColor = color;
         Console.WriteLine(message);
